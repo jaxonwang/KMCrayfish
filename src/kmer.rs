@@ -1,49 +1,50 @@
+use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Formatter;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
-trait Alphabet: Debug + Copy + Ord {
+pub trait Alphabet {
     // size_of_usize % unit_len must be 0
     const UNIT_LEN: usize;
-    fn to_unit(base: char) -> Option<u8>;
-    fn to_char(unit: u8) -> Option<char>;
+    fn to_unit(base: u8) -> Option<u8>;
+    fn to_u8(unit: u8) -> Option<u8>;
 }
 
-#[derive(Debug, Copy, Clone, Ord, PartialOrd, PartialEq, Eq)]
-struct DNA {}
+pub struct DNA {}
 
 impl Alphabet for DNA {
     const UNIT_LEN: usize = 2;
-    fn to_unit(base: char) -> Option<u8> {
+    fn to_unit(base: u8) -> Option<u8> {
         Some(match base {
-            'A' => 0b00,
-            'T' => 0b11,
-            'G' => 0b10,
-            'C' => 0b01,
+            b'A' => 0b00,
+            b'T' => 0b11,
+            b'G' => 0b10,
+            b'C' => 0b01,
             _ => return None,
         })
     }
-    fn to_char(unit: u8) -> Option<char> {
+    fn to_u8(unit: u8) -> Option<u8> {
         Some(match unit {
-            0b00 => 'A',
-            0b11 => 'T',
-            0b10 => 'G',
-            0b01 => 'C',
+            0b00 => b'A',
+            0b11 => b'T',
+            0b10 => b'G',
+            0b01 => b'C',
             _ => return None,
         })
     }
 }
 
-const KMER_LEN: usize = 31;
-//
-trait KMer
+pub trait AbstractKMer
 where
-    Self: Sized + Ord + Copy,
+    Self: Sized + Ord + Copy + Hash,
 {
     fn kmer_len() -> usize;
-    fn extend(&self, base: char) -> Option<Self>;
+    fn extend(&self, base: u8) -> Option<Self>;
+    fn from_bytes(bytes: &[u8]) -> Option<Self>;
     fn reverse(&self) -> Self;
     fn complement(&self) -> Self;
     fn get_canonical(&self) -> Self {
@@ -56,18 +57,36 @@ where
     }
 }
 
-#[derive(Copy, Clone, Ord, PartialOrd)]
-struct KMer64<A>
+pub struct KMeru64<A, const KMERLEN: usize>
 where
     A: Alphabet,
 {
-    data: u64,
+    pub data: u64,
     _mark: PhantomData<A>,
 }
 
-impl<A> Eq for KMer64<A> where A: Alphabet {}
+impl<A, const N: usize> Copy for KMeru64<A, N> where A: Alphabet {}
+impl<A, const N: usize> Clone for KMeru64<A, N>
+where
+    A: Alphabet,
+{
+    fn clone(&self) -> Self {
+        Self::new(self.data)
+    }
+}
 
-impl<A> PartialEq for KMer64<A>
+impl<A, const N: usize> Hash for KMeru64<A, N>
+where
+    A: Alphabet,
+{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.data.hash(state);
+    }
+}
+
+impl<A, const N: usize> Eq for KMeru64<A, N> where A: Alphabet {}
+
+impl<A, const N: usize> PartialEq for KMeru64<A, N>
 where
     A: Alphabet,
 {
@@ -76,7 +95,25 @@ where
     }
 }
 
-impl<A> Debug for KMer64<A>
+impl<A, const N: usize> Ord for KMeru64<A, N>
+where
+    A: Alphabet,
+{
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.data.cmp(&other.data)
+    }
+}
+
+impl<A, const N: usize> PartialOrd for KMeru64<A, N>
+where
+    A: Alphabet,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.data.partial_cmp(&other.data)
+    }
+}
+
+impl<A, const N: usize> Debug for KMeru64<A, N>
 where
     A: Alphabet,
 {
@@ -85,7 +122,7 @@ where
     }
 }
 
-impl<A> Default for KMer64<A>
+impl<A, const N: usize> Default for KMeru64<A, N>
 where
     A: Alphabet,
 {
@@ -94,12 +131,12 @@ where
     }
 }
 
-impl<A> KMer64<A>
+impl<A, const N: usize> KMeru64<A, N>
 where
     A: Alphabet,
 {
-    fn new(data: u64) -> Self {
-        KMer64 {
+    pub fn new(data: u64) -> Self {
+        KMeru64 {
             data,
             _mark: PhantomData,
         }
@@ -124,7 +161,7 @@ where
     }
 
     fn used_bits() -> usize {
-        A::UNIT_LEN * KMER_LEN
+        A::UNIT_LEN * Self::kmer_len()
     }
 
     fn data_len() -> usize {
@@ -136,11 +173,11 @@ where
     }
 }
 
-impl<A> KMer for KMer64<A>
+impl<A, const N: usize> AbstractKMer for KMeru64<A, N>
 where
     A: Alphabet,
 {
-    fn extend(&self, base: char) -> Option<Self> {
+    fn extend(&self, base: u8) -> Option<Self> {
         let mut next = *self;
         let unit = A::to_unit(base)? as u64;
         next.data = self.data << A::UNIT_LEN | unit;
@@ -148,7 +185,7 @@ where
         Some(next)
     }
     fn kmer_len() -> usize {
-        KMER_LEN
+        N
     }
     fn complement(&self) -> Self {
         let data = !self.data & u64::MAX >> Self::unused_bits();
@@ -161,35 +198,42 @@ where
         let data = ssse3::reverse_u64_pack_2(self.data) >> Self::unused_bits();
         Self::new(data)
     }
+
+    fn from_bytes(s: &[u8]) -> Option<Self> {
+        let mut kmer = Self::default();
+
+        if s.len() < Self::kmer_len() {
+            return None;
+        }
+        let mut iter = s.iter().take(Self::kmer_len()).enumerate();
+        while let Some((i, c)) = iter.next() {
+            kmer.set_unit(i, A::to_unit(*c)?)
+        }
+        kmer.data >>= Self::unused_bits();
+        Some(kmer)
+    }
 }
 
-impl<A> std::str::FromStr for KMer64<A>
+impl<A, const N: usize> std::str::FromStr for KMeru64<A, N>
 where
     A: Alphabet,
 {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut kmer = Self::default();
-        debug_assert!(s.len() >= KMER_LEN);
-        let mut iter = s.chars().take(KMER_LEN).enumerate();
-        while let Some((i, c)) = iter.next() {
-            kmer.set_unit(i, A::to_unit(c).ok_or(())?)
-        }
-        kmer.data >>= Self::unused_bits();
-        Ok(kmer)
+        Self::from_bytes(s.as_bytes()).ok_or(())
     }
 }
 
-impl<A> std::string::ToString for KMer64<A>
+impl<A, const N: usize> std::string::ToString for KMeru64<A, N>
 where
     A: Alphabet,
 {
     fn to_string(&self) -> String {
-        let mut s = String::default();
+        let mut s = vec![];
         for i in Self::unused_bits() / A::UNIT_LEN..size_of::<u64>() * 8 / A::UNIT_LEN {
-            s.push(A::to_char(self.get_unit(i)).unwrap())
+            s.push(A::to_u8(self.get_unit(i)).unwrap())
         }
-        s
+        String::from_utf8(s).unwrap()
     }
 }
 
@@ -222,8 +266,6 @@ mod ssse3 {
         #[allow(overflowing_literals)]
         let slo = _mm_shuffle_epi8(
             _mm_setr_epi8(
-                // 0x00, 0x80, 0x40, 0xc0, 0x20, 0xa0, 0x60, 0xe0, 0x10, 0x90, 0x50, 0xd0, 0x30, 0xb0,
-                // 0x70, 0xf0,
                 0x00, 0x40, 0x80, 0xc0, 0x10, 0x50, 0x90, 0xd0, 0x20, 0x60, 0xa0, 0xe0, 0x30, 0x70,
                 0xb0, 0xf0,
             ),
@@ -233,8 +275,6 @@ mod ssse3 {
         // println!("ho {:X?}", hi);
         let shi = _mm_shuffle_epi8(
             _mm_setr_epi8(
-                // 0x00, 0x08, 0x04, 0x0c, 0x02, 0x0a, 0x06, 0x0e, 0x01, 0x09, 0x05, 0x0d, 0x03, 0x0b,
-                // 0x07, 0x0f,
                 0x00, 0x04, 0x08, 0x0c, 0x01, 0x05, 0x09, 0x0d, 0x02, 0x06, 0x0a, 0x0e, 0x03, 0x07,
                 0x0b, 0x0f,
             ),
@@ -265,56 +305,53 @@ mod ssse3 {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    type KMer31 = KMeru64<DNA, 31>;
     #[test]
     pub fn test_parse() {
         let read = "TCGCGTAGCTAGCATATATTCGCGGCTAGTAC";
-        let kmer = read.parse::<KMer64<DNA>>().unwrap();
-        assert_eq!(&kmer.to_string(), &read[..KMER_LEN]);
+        let kmer = read.parse::<KMer31>().unwrap();
+        assert_eq!(&kmer.to_string(), &read[..KMer31::kmer_len()]);
     }
 
     #[test]
     pub fn test_get_unit() {
         let read = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        let mut kmer = read.parse::<KMer64<DNA>>().unwrap();
-        kmer.set_unit(1, DNA::to_unit('C').unwrap());
-        assert_eq!(DNA::to_char(kmer.get_unit(1)).unwrap(), 'C');
+        let mut kmer = read.parse::<KMer31>().unwrap();
+        kmer.set_unit(1, DNA::to_unit(b'C').unwrap());
+        assert_eq!(DNA::to_u8(kmer.get_unit(1)).unwrap(), b'C');
     }
 
     #[test]
     pub fn test_complement() {
-        let kmer = "AAAAAAAAAAAAAAAAAAAAAAAAAAACCCC"
-            .parse::<KMer64<DNA>>()
-            .unwrap();
-        let comp = "TTTTTTTTTTTTTTTTTTTTTTTTTTTGGGG"
-            .parse::<KMer64<DNA>>()
-            .unwrap();
+        let kmer = "AAAAAAAAAAAAAAAAAAAAAAAAAAACCCC".parse::<KMer31>().unwrap();
+        let comp = "TTTTTTTTTTTTTTTTTTTTTTTTTTTGGGG".parse::<KMer31>().unwrap();
         assert_eq!(kmer.complement(), comp);
     }
 
     #[test]
     pub fn test_reverse() {
-        let kmer = "AAAAAAAAAAAAAAAAAAAAAAAAAAACCCC"
-            .parse::<KMer64<DNA>>()
-            .unwrap();
-        let reverse = "CCCCAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-            .parse::<KMer64<DNA>>()
-            .unwrap();
+        let kmer = "AAAAAAAAAAAAAAAAAAAAAAAAAAACCCC".parse::<KMer31>().unwrap();
+        let reverse = "CCCCAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse::<KMer31>().unwrap();
         assert_eq!(kmer.reverse(), reverse);
     }
 
     #[test]
     pub fn test_canonical() {
-        let kmer = "CCCCAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-            .parse::<KMer64<DNA>>()
-            .unwrap();
+        let kmer = "CCCCAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse::<KMer31>().unwrap();
         assert_eq!(kmer, kmer.get_canonical());
 
-        let kmer = "GGGGGGGGGGGGGGGGGGGGGGGGGGGCCCC"
-            .parse::<KMer64<DNA>>()
-            .unwrap();
+        let kmer = "GGGGGGGGGGGGGGGGGGGGGGGGGGGCCCC".parse::<KMer31>().unwrap();
         let c = "GGGGCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
-            .parse::<KMer64<DNA>>()
+            .parse::<KMer31>()
             .unwrap();
         assert_eq!(c, kmer.get_canonical());
+    }
+
+    #[test]
+    pub fn test_extend() {
+        let kmer = "CCCCAAAAAAAAAAAAAAAAAAAAAAAAAAA".parse::<KMer31>().unwrap();
+        let kmer_e = "CCCAAAAAAAAAAAAAAAAAAAAAAAAAAAT".parse::<KMer31>().unwrap();
+        assert_eq!(kmer.extend(b'T').unwrap(), kmer_e);
     }
 }
