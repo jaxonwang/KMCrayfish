@@ -27,18 +27,13 @@ type Reads = Vec<Vec<u8>>;
 type CountTable = FxHashMap<KMer, usize>;
 type KMer = KMeru64<DNA, KMER_LEN>;
 
-fn update_count_table(count_table: &mut CountTable, kmer: KMer) {
-    // merge data of the same kmer
-    *count_table.entry(kmer).or_insert(0) += 1;
-}
-
 #[crayfish::activity]
 async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountTable>>) {
-    info!("Got {} kmers. Counting", kmers.len());
+    // info!("Got {} kmers. Counting", kmers.len());
     let ptr = final_ptr.upgrade().unwrap();
     let mut h = ptr.lock().unwrap();
     for kmer in kmers {
-        update_count_table(&mut h, KMer::new(kmer));
+        *h.entry(KMer::new(kmer)).or_insert(0) += 1;
     }
 }
 
@@ -67,7 +62,8 @@ async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountTable>
             if start {
                 match KMer::from_bytes(&read[next_pos..]) {
                     Some(k) => {
-                        // TODO depends on trait. struct field k.data used here
+                        let k = k.get_canonical();
+                        // TODO should depends on trait. struct field k.data used here
                         kmers[get_partition(&k)].push(k.data);
                         current_kmer = k;
                         next_pos += KMer::kmer_len();
@@ -80,6 +76,7 @@ async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountTable>
             } else {
                 match current_kmer.extend(read[next_pos]) {
                     Some(k) => {
+                        let k = k.get_canonical();
                         kmers[get_partition(&k)].push(k.data);
                         current_kmer = k;
                     }
@@ -102,10 +99,10 @@ async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountTable>
 #[crayfish::main]
 async fn inner_main() {
     let count_table_ptr = PlaceLocal::new(Mutex::new(CountTable::default()));
-    collective::barrier();
+    collective::barrier().await;
     if global_id::here() == 0 {
         // ctx contains a new finish id now
-        let chunk_size = 40960;
+        let chunk_size = 81920;
         let args = std::env::args().collect::<Vec<_>>();
         let filename = &args[1];
         let file = File::open(filename).unwrap();
@@ -117,12 +114,13 @@ async fn inner_main() {
 
         finish! {
         for (l_num, line) in lines.enumerate() {
-            if l_num % 2 != 1 {
+            // TODO: stupid fasta reader
+            if l_num % 4 != 1 {
                 continue;
             }
             if let Ok(s) = line {
                 if buffer.len() == chunk_size {
-                    warn!(
+                    info!(
                         "Sending {}~{} reads to {}",
                         l_num / 4,
                         l_num / 4 + chunk_size - 1,
@@ -138,7 +136,7 @@ async fn inner_main() {
         }
         }
     }
-    collective::barrier();
+    collective::barrier().await;
 
     let global_table = count_table_ptr.lock().unwrap();
 
