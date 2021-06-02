@@ -13,6 +13,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::sync::Mutex;
@@ -95,6 +96,52 @@ async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountTable>
     }
 }
 
+// TODO: stupid fasta reader
+struct SeqReader<I>
+where
+    I: Iterator<Item = io::Result<String>>,
+{
+    lines: I,
+}
+
+impl<T> SeqReader<T>
+where
+    T: Iterator<Item = io::Result<String>>,
+{
+    pub fn new(lines: T) -> Self {
+        SeqReader { lines }
+    }
+}
+
+impl<T> Iterator for SeqReader<T>
+where
+    T: Iterator<Item = io::Result<String>>,
+{
+    type Item = Vec<u8>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut skip_q = false;
+        loop {
+            let line = self.lines.next()?.unwrap().into_bytes();
+            if !line.is_empty() {
+                match line[0] {
+                    b'@' => {
+                        skip_q = false;
+                    }
+                    b'>' => (),
+                    b'+' => {
+                        skip_q = true;
+                    }
+                    _ => {
+                        if !skip_q {
+                            return Some(line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // desugered finish
 #[crayfish::main]
 async fn inner_main() {
@@ -107,6 +154,7 @@ async fn inner_main() {
         let filename = &args[1];
         let file = File::open(filename).unwrap();
         let lines = BufReader::new(file).lines();
+        let lines = SeqReader::new(lines.into_iter());
 
         let world_size = world_size();
         let mut next_place: Place = 0;
@@ -114,16 +162,11 @@ async fn inner_main() {
 
         finish! {
         for (l_num, line) in lines.enumerate() {
-            // TODO: stupid fasta reader
-            if l_num % 4 != 1 {
-                continue;
-            }
-            if let Ok(s) = line {
                 if buffer.len() == chunk_size {
                     info!(
                         "Sending {}~{} reads to {}",
-                        l_num / 4,
-                        l_num / 4 + chunk_size - 1,
+                        l_num,
+                        l_num + chunk_size - 1,
                         next_place
                     );
                     let mut new_read = vec![];
@@ -131,8 +174,7 @@ async fn inner_main() {
                     crayfish::ff!(next_place, kmer_counting(new_read, count_table_ptr.downgrade()));
                     next_place = (next_place + 1) % (world_size as Place);
                 }
-                buffer.push(s.into_bytes());
-            }
+                buffer.push(line);
         }
         }
     }
@@ -140,12 +182,11 @@ async fn inner_main() {
 
     let global_table = count_table_ptr.lock().unwrap();
 
-    let mut hist = vec![0usize; 100];
+    let mut hist = vec![0usize; 1024];
     for (_, count) in global_table.iter() {
-        while *count >= hist.len() {
-            hist.push(0);
+        if *count <= hist.len() {
+            hist[*count - 1] += 1;
         }
-        hist[*count] += 1;
     }
     println!("{:?}", hist);
 }
