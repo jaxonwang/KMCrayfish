@@ -30,12 +30,13 @@ type KMer = KMeru64<DNA, KMER_LEN>;
 
 #[crayfish::activity]
 async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountTable>>) {
-    // info!("Got {} kmers. Counting", kmers.len());
+    info!("Got {} kmers. Counting", kmers.len());
     let ptr = final_ptr.upgrade().unwrap();
     let mut h = ptr.lock().unwrap();
     for kmer in kmers {
         *h.entry(KMer::new(kmer)).or_insert(0) += 1;
     }
+    info!("Counting Done");
 }
 
 fn get_partition(kmer: &KMer) -> usize {
@@ -96,7 +97,7 @@ async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountTable>
     }
 }
 
-// TODO: stupid fasta reader
+// TODO: stupid fasta/fastq reader
 struct SeqReader<I>
 where
     I: Iterator<Item = io::Result<String>>,
@@ -149,7 +150,7 @@ async fn inner_main() {
     collective::barrier().await;
     if global_id::here() == 0 {
         // ctx contains a new finish id now
-        let chunk_size = 81920;
+        let chunk_size = 20480;
         let args = std::env::args().collect::<Vec<_>>();
         let filename = &args[1];
         let file = File::open(filename).unwrap();
@@ -167,12 +168,12 @@ async fn inner_main() {
                         "Sending {}~{} reads to {}",
                         l_num,
                         l_num + chunk_size - 1,
-                        next_place
+                        next_place + 1
                     );
                     let mut new_read = vec![];
                     std::mem::swap(&mut new_read, &mut buffer);
-                    crayfish::ff!(next_place, kmer_counting(new_read, count_table_ptr.downgrade()));
-                    next_place = (next_place + 1) % (world_size as Place);
+                    crayfish::ff!(next_place + 1, kmer_counting(new_read, count_table_ptr.downgrade()));
+                    next_place = (next_place + 1) % (world_size as Place - 1); // avoid root
                 }
                 buffer.push(line);
         }
@@ -188,5 +189,5 @@ async fn inner_main() {
             hist[*count - 1] += 1;
         }
     }
-    println!("{:?}", hist);
+    info!("{:?}", hist);
 }
