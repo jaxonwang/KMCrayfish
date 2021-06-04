@@ -8,7 +8,6 @@ use crayfish::logging::*;
 use crayfish::place::Place;
 use crayfish::shared::PlaceLocal;
 use crayfish::shared::PlaceLocalWeak;
-use rustc_hash::FxHashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
 use std::hash::Hash;
@@ -25,18 +24,14 @@ use kmer::DNA;
 const KMER_LEN: usize = 31;
 
 type Reads = Vec<Vec<u8>>;
-type CountTable = FxHashMap<KMer, usize>;
+type CountBin = Vec<u64>;
 type KMer = KMeru64<DNA, KMER_LEN>;
 
 #[crayfish::activity]
-async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountTable>>) {
-    info!("Got {} kmers. Counting", kmers.len());
+async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountBin>>) {
     let ptr = final_ptr.upgrade().unwrap();
     let mut h = ptr.lock().unwrap();
-    for kmer in kmers {
-        *h.entry(KMer::new(kmer)).or_insert(0) += 1;
-    }
-    info!("Counting Done");
+    h.extend_from_slice(&kmers[..]);
 }
 
 fn get_partition(kmer: &KMer) -> usize {
@@ -46,7 +41,7 @@ fn get_partition(kmer: &KMer) -> usize {
 }
 
 #[crayfish::activity]
-async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountTable>>) {
+async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountBin>>) {
     info!("Got {} reads. Spliting into Kmers", reads.len());
 
     let mut kmers = vec![vec![]; global_id::world_size()];
@@ -146,11 +141,11 @@ where
 // desugered finish
 #[crayfish::main]
 async fn inner_main() {
-    let count_table_ptr = PlaceLocal::new(Mutex::new(CountTable::default()));
+    let count_bin = PlaceLocal::new(Mutex::new(CountBin::default()));
     collective::barrier().await;
     if global_id::here() == 0 {
         // ctx contains a new finish id now
-        let chunk_size = 20480;
+        let chunk_size = 40960;
         let args = std::env::args().collect::<Vec<_>>();
         let filename = &args[1];
         let file = File::open(filename).unwrap();
@@ -172,7 +167,7 @@ async fn inner_main() {
                     );
                     let mut new_read = vec![];
                     std::mem::swap(&mut new_read, &mut buffer);
-                    crayfish::ff!(next_place + 1, kmer_counting(new_read, count_table_ptr.downgrade()));
+                    crayfish::ff!(next_place + 1, kmer_counting(new_read, count_bin.downgrade()));
                     next_place = (next_place + 1) % (world_size as Place - 1); // avoid root
                 }
                 buffer.push(line);
@@ -181,12 +176,28 @@ async fn inner_main() {
     }
     collective::barrier().await;
 
-    let global_table = count_table_ptr.lock().unwrap();
+    let mut sorted_bin = count_bin.lock().unwrap();
+    use crate::kmer::radix::RadixSort;
+    sorted_bin.voracious_sort();
 
     let mut hist = vec![0usize; 1024];
-    for (_, count) in global_table.iter() {
-        if *count <= hist.len() {
-            hist[*count - 1] += 1;
+    let hist_len = hist.len();
+
+    if sorted_bin.is_empty() {
+        return
+    }
+    let mut current = sorted_bin[0];
+    let mut count = 0;
+
+    for kmer in sorted_bin.iter() {
+        if current != *kmer {
+            if count <= hist_len {
+                hist[count - 1] += 1;
+            }
+            current = *kmer;
+            count = 1;
+        }else{
+            count += 1;
         }
     }
     info!("{:?}", hist);

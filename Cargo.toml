@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 crayfish = { path = "./crayfish/crayfish", features=["net-mpi"]} 
 rustc-hash = "1.1"
+voracious_radix_sort = "1.1"

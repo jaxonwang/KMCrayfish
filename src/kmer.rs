@@ -7,6 +7,8 @@ use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::mem::size_of;
 
+pub extern crate voracious_radix_sort as radix;
+
 pub trait Alphabet {
     // size_of_usize % unit_len must be 0
     const UNIT_LEN: usize;
@@ -65,6 +67,12 @@ where
     _mark: PhantomData<A>,
 }
 
+impl<A, const N:usize> radix::Radixable<u64> for KMeru64<A, N> where A: Alphabet{
+    type Key = u64;
+    fn key(&self) -> Self::Key{
+        self.data
+    }
+}
 impl<A, const N: usize> Copy for KMeru64<A, N> where A: Alphabet {}
 impl<A, const N: usize> Clone for KMeru64<A, N>
 where
