@@ -16,3 +16,6 @@ memchr = "2.4"
 [[bin]]
 name = "kmcrayfish2"
 path = "src/main_io.rs"
+
+[profile.release]
+debug = true
