@@ -31,7 +31,6 @@ async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountBin>>
 }
 
 fn get_partition(kmer: &KMer) -> usize {
-    /*
     let mut key = kmer.data;
     key = !key + (key << 21);
 	key = key ^ key >> 24;
@@ -41,11 +40,10 @@ fn get_partition(kmer: &KMer) -> usize {
 	key = key ^ key >> 28;
 	key = key + (key << 31);
     (key % place::world_size() as u64) as usize
-    */
-    let key = kmer.data;
-    let mut hs = rustc_hash::FxHasher::default();
-    key.hash(&mut hs);
-    (hs.finish() % place::world_size() as u64) as usize
+    // let key = kmer.data;
+    // let mut hs = rustc_hash::FxHasher::default();
+    // key.hash(&mut hs);
+    // (hs.finish() % place::world_size() as u64) as usize
 }
 
 // TODO: stupid fasta/fastq reader
