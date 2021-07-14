@@ -2,8 +2,8 @@ mod kmer;
 
 use crayfish::collective;
 use crayfish::finish;
-use crayfish::global_id;
-use crayfish::global_id::world_size;
+use crayfish::place;
+use crayfish::place::world_size;
 use crayfish::logging::*;
 use crayfish::place::Place;
 use crayfish::shared::PlaceLocal;
@@ -37,14 +37,14 @@ async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountBin>>
 fn get_partition(kmer: &KMer) -> usize {
     let mut hasher = DefaultHasher::new();
     kmer.hash(&mut hasher);
-    (hasher.finish() % global_id::world_size() as u64) as usize
+    (hasher.finish() % place::world_size() as u64) as usize
 }
 
 #[crayfish::activity]
 async fn kmer_counting(reads: Reads, final_ptr: PlaceLocalWeak<Mutex<CountBin>>) {
     info!("Got {} reads. Spliting into Kmers", reads.len());
 
-    let mut kmers = vec![vec![]; global_id::world_size()];
+    let mut kmers = vec![vec![]; place::world_size()];
     for read in reads {
         // drop too short read
         if read.len() < KMer::kmer_len() {
@@ -143,7 +143,7 @@ where
 async fn inner_main() {
     let count_bin = PlaceLocal::new(Mutex::new(CountBin::default()));
     collective::barrier().await;
-    if global_id::here() == 0 {
+    if place::here() == 0 {
         // ctx contains a new finish id now
         let chunk_size = 40960;
         let args = std::env::args().collect::<Vec<_>>();

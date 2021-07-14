@@ -2,8 +2,8 @@ mod kmer;
 
 use crayfish::collective;
 use crayfish::finish;
-use crayfish::global_id;
-use crayfish::global_id::world_size;
+use crayfish::place;
+use crayfish::place::world_size;
 use crayfish::logging::*;
 use crayfish::place::Place;
 use crayfish::shared::PlaceLocal;
@@ -31,6 +31,7 @@ async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountBin>>
 }
 
 fn get_partition(kmer: &KMer) -> usize {
+    /*
     let mut key = kmer.data;
     key = !key + (key << 21);
 	key = key ^ key >> 24;
@@ -39,7 +40,12 @@ fn get_partition(kmer: &KMer) -> usize {
 	key = (key + (key << 2)) + (key << 4);
 	key = key ^ key >> 28;
 	key = key + (key << 31);
-    (key % global_id::world_size() as u64) as usize
+    (key % place::world_size() as u64) as usize
+    */
+    let key = kmer.data;
+    let mut hs = rustc_hash::FxHasher::default();
+    key.hash(&mut hs);
+    (hs.finish() % place::world_size() as u64) as usize
 }
 
 // TODO: stupid fasta/fastq reader
@@ -57,14 +63,15 @@ impl<T> SeqReader<T>
 
 impl<'a, T> Iterator for SeqReader<T>
 where
-    T: Iterator<Item = &'a[u8]> + 'a,
+    T: Iterator<Item = String> + 'a,
 {
-    type Item = &'a[u8];
+    type Item = Vec<u8>;
     fn next(&mut self) -> Option<Self::Item> {
         let mut skip_q = false;
         loop {
             let line = self.lines.next()?;
             if !line.is_empty() {
+                let line = line.into_bytes();
                 match line[0] {
                     b'@' => {
                         skip_q = false;
@@ -115,18 +122,20 @@ async fn inner_main() {
     let count_bin = PlaceLocal::new(Mutex::new(CountBin::default()));
     collective::barrier().await;
     // ctx contains a new finish id now
-        let mut kmers = vec![vec![]; global_id::world_size()];
+        let mut kmers = vec![vec![]; place::world_size()];
         let args = std::env::args().collect::<Vec<_>>();
         let filename = &args[1];
         let file = File::open(filename).unwrap();
-        let mapped = unsafe {memmap::Mmap::map(&file).unwrap()};
-        let lines = SeqReader::new(Lines::new(mapped.as_ref()));
+        use std::io::BufReader;
+        use std::io::BufRead;
+        let bf = BufReader::new(file);
+        let lines = SeqReader::new(bf.lines().map(|lr|lr.unwrap()));
         // let lines = Lines
 
         let world_size = world_size();
-        let here = global_id::here();
+        let here = place::here();
 
-        let chunk_size = 40960;
+        let chunk_size = 40960usize;
 
         finish! {
         for (l_num, read) in lines.enumerate() {
@@ -173,7 +182,7 @@ async fn inner_main() {
 
             // interleave communication and computing
             if l_num / world_size  % chunk_size == 0 {
-                let mut new_kmers = vec![vec![]; global_id::world_size()];
+                let mut new_kmers = vec![vec![]; place::world_size()];
                 std::mem::swap(&mut new_kmers, &mut kmers);
                 for (dst, kmer_list) in new_kmers.into_iter().enumerate() {
                     crayfish::ff!(dst as Place, update_kmer(kmer_list, count_bin.downgrade()));
