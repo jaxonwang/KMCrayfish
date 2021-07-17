@@ -13,6 +13,7 @@ use std::fs::File;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Mutex;
+use bloomfilter::Bloom;
 
 use kmer::AbstractKMer;
 use kmer::KMeru64;
@@ -20,14 +21,39 @@ use kmer::DNA;
 
 const KMER_LEN: usize = 31;
 
-type CountBin = Vec<u64>;
 type KMer = KMeru64<DNA, KMER_LEN>;
+
+struct CountBin{
+    kmers: Vec<u64>,
+    bloom: Bloom<u64>
+}
+
+impl CountBin{
+    fn new(total_kmer: usize) -> Self{
+        let per_rank = total_kmer / place::world_size();
+        let size = per_rank / 30_000_000 * 128 * 1024 * 1024;
+        info!("setting size to {} with {} kmers", size, per_rank);
+
+        CountBin{
+            kmers: vec![],
+            bloom: Bloom::new(size, per_rank) // hardcoded, 64MB, 30M kmers per rank
+        }
+    }
+}
 
 #[crayfish::activity]
 async fn update_kmer(kmers: Vec<u64>, final_ptr: PlaceLocalWeak<Mutex<CountBin>>) {
     let ptr = final_ptr.upgrade().unwrap();
     let mut h = ptr.lock().unwrap();
-    h.extend_from_slice(&kmers[..]);
+    h.kmers.extend_from_slice(&kmers[..]);
+    /*
+    for kmer in kmers{
+        let exist = h.bloom.check_and_set(&kmer);
+        if exist {
+            h.kmers.push(kmer)
+        }
+    }
+    */
 }
 
 fn get_partition(kmer: &KMer) -> usize {
@@ -117,7 +143,7 @@ impl<'a> Iterator for Lines<'a>{
 // desugered finish
 #[crayfish::main]
 async fn inner_main() {
-    let count_bin = PlaceLocal::new(Mutex::new(CountBin::default()));
+    let count_bin = PlaceLocal::new(Mutex::new(CountBin::new(7487764350)));
     collective::barrier().await;
     // ctx contains a new finish id now
         let mut kmers = vec![vec![]; place::world_size()];
@@ -186,6 +212,11 @@ async fn inner_main() {
                     crayfish::ff!(dst as Place, update_kmer(kmer_list, count_bin.downgrade()));
                 }
             }
+
+            const TEN_GB_LINE :usize = 13614117 * 10;
+            if l_num % TEN_GB_LINE == 0 {
+                info!("{}0 GB sequences processed.", l_num / TEN_GB_LINE);
+            }
         }
 
         for (dst, kmer_list) in kmers.into_iter().enumerate() {
@@ -194,27 +225,29 @@ async fn inner_main() {
         info!("k-mer gen done");
             
         }
+    info!("Send finished");
     collective::barrier().await;
     info!("start counting");
 
     let mut sorted_bin = count_bin.lock().unwrap();
     use crate::kmer::radix::RadixSort;
-    sorted_bin.voracious_sort();
+    sorted_bin.kmers.voracious_sort();
 
     let mut hist = vec![0usize; 1024];
     let hist_len = hist.len();
 
-    if sorted_bin.is_empty() {
+    if sorted_bin.kmers.is_empty() {
         return
     }
-    let mut current = sorted_bin[0];
+    let mut current = sorted_bin.kmers[0];
     let mut count = 0;
 
-    for kmer in sorted_bin.iter() {
+    for kmer in sorted_bin.kmers.iter() {
         if current != *kmer {
-            if count <= hist_len {
-                hist[count - 1] += 1;
+            while hist.len() < count {
+                hist.push(0);
             }
+            hist[count - 1] += 1;
             current = *kmer;
             count = 1;
         }else{
