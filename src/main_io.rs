@@ -8,10 +8,7 @@ use crayfish::logging::*;
 use crayfish::place::Place;
 use crayfish::shared::PlaceLocal;
 use crayfish::shared::PlaceLocalWeak;
-use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
-use std::hash::Hash;
-use std::hash::Hasher;
 use std::sync::Mutex;
 
 use kmer::AbstractKMer;
